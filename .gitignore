@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+data/raw/
+data/external/*.npy
+models/*.h5
