@@ -1,5 +1,19 @@
 .venv/
 __pycache__/
+.claude/
+
+# Raw and external data (too large for GitHub)
 data/raw/
-data/external/*.npy
+data/external/
+
+# Large processed CSVs (>100MB GitHub limit)
+data/processed/hybrid_drowsiness_dataset.csv
+data/processed/new_hybrid_drowsiness_dataset.csv
+data/processed/master_v3_dataset.csv
+data/processed/master_v3_dataset_with_ids.csv
+data/processed/master_v3_dataset_with_subjects.csv
+data/processed/v3_chunks/
+
+# Model binaries
 models/*.h5
+models/*.task
