@@ -76,6 +76,7 @@ is_yawning = False
 missing_face_frames = 0
 window_filled_time = None  # set when ear_history reaches WINDOW_SIZE for the first time
 alert_state = 0             # 0 = attentive, 1 = tired (hysteresis state machine)
+last_valid_pitch = None     # for pitch spike rejection
 
 # Kalman filters — one per signal
 ear_kf = KalmanFilter1D(process_variance=1e-4, measurement_variance=1e-2)
@@ -146,6 +147,13 @@ while cap.isOpened():
 
         # --- ENABLED 3D MATH ---
         raw_pitch, yaw, roll = get_head_pose(landmarks, w, h)
+
+        # Spike rejection: discard readings that jump >20° in one frame
+        if last_valid_pitch is not None and abs(raw_pitch - last_valid_pitch) > 20:
+            raw_pitch = last_valid_pitch
+        else:
+            last_valid_pitch = raw_pitch
+
         pitch = pitch_kf.update(raw_pitch) - baseline_pitch  # smooth then remove camera angle
         pitch = float(np.clip(pitch, -90, 90))
         yaw   = float(np.clip(yaw, -90, 90))
@@ -240,8 +248,11 @@ while cap.isOpened():
                     prediction_history.clear()  # wipe old tired votes so recovery sticks
                 smoothed_class_idx = alert_state
 
-                # --- X-RAY ---
-                print(f"NormEAR: {avg_ear_val:.2f} | PERCLOS: {perclos:.2f} | BlinkDur: {final_blink_dur:.2f} | Pitch: {pitch:.1f} | 5s Ratio: {tired_ratio*100:.0f}%")
+                # --- X-RAY (all 10 model input features) ---
+                print(f"[FEATURES] PERCLOS:{perclos:.2f} EAR:{avg_ear_val:.2f} STD:{ear_std:.3f} "
+                      f"MAR:{avg_mar_val:.2f} YAWNS:{recent_yawns} BR:{blink_rate:.2f} "
+                      f"BD:{final_blink_dur:.2f} P:{pitch:.1f} Y:{yaw:.1f} R:{roll:.1f} "
+                      f"| vote:{tired_ratio*100:.0f}% state:{'TIRED' if alert_state else 'ATTENTIVE'}")
 
                 # --- HYBRID OVERRIDE (micro-sleep / extended blink) ---
                 if final_blink_dur > 2.5 or perclos > 0.85:

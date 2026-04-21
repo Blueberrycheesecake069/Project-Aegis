@@ -58,7 +58,7 @@ _MODEL_PATH      = os.path.join(_PROJECT_ROOT, 'models', 'vision_model.tflite')
 _LANDMARKER_PATH = os.path.join(_PROJECT_ROOT, 'models', 'face_landmarker.task')
 
 try:
-    interpreter = TFLiteInterpreter(model_path=_MODEL_PATH)
+    interpreter = TFLiteInterpreter(model_path=_MODEL_PATH, num_threads=2)
     interpreter.allocate_tensors()
     _input_details  = interpreter.get_input_details()
     _output_details = interpreter.get_output_details()
@@ -80,7 +80,7 @@ detector = vision.FaceLandmarker.create_from_options(options)
 # =============================================================================
 # 2. PARAMETERS
 # =============================================================================
-WINDOW_SIZE          = 30
+WINDOW_SIZE          = 60
 CALIBRATION_FRAMES   = 50
 MAX_CALIB_ATTEMPTS   = 3
 CALIB_EAR_MIN        = 0.20   # physiological lower bound for resting EAR
@@ -95,9 +95,9 @@ TIRED_EXIT_THRESHOLD  = 0.25  # tired_ratio must drop below this to revert to AT
 # =============================================================================
 # 3. HISTORIES & STATE
 # =============================================================================
-ear_history        = deque(maxlen=WINDOW_SIZE)
-ear_timestamps     = deque(maxlen=WINDOW_SIZE)   # wall-clock time per EAR sample
-mar_history        = deque(maxlen=WINDOW_SIZE)
+ear_history    = deque(maxlen=WINDOW_SIZE)
+ear_timestamps = deque(maxlen=WINDOW_SIZE)
+mar_history    = deque(maxlen=WINDOW_SIZE)
 blink_durations    = deque(maxlen=10)
 yawn_timestamps    = deque(maxlen=10)
 prediction_history = deque()
@@ -107,7 +107,8 @@ is_blinking         = False
 is_yawning          = False
 missing_face_frames = 0
 window_filled_time  = None
-alert_state         = 0   # 0 = attentive, 1 = tired (hysteresis state machine)
+alert_state         = 0     # 0 = attentive, 1 = tired (hysteresis state machine)
+last_valid_pitch    = None  # for pitch spike rejection
 
 # Kalman filters — pitch/yaw/roll all get smoothed now
 ear_kf   = KalmanFilter1D(process_variance=1e-4, measurement_variance=1e-2)
@@ -116,6 +117,8 @@ yaw_kf   = KalmanFilter1D(process_variance=0.5,  measurement_variance=2.0)
 roll_kf  = KalmanFilter1D(process_variance=0.5,  measurement_variance=2.0)
 
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 
 # =============================================================================
@@ -239,6 +242,12 @@ while cap.isOpened():
 
         raw_pitch, raw_yaw, raw_roll = get_head_pose(landmarks, w, h)
 
+        # Spike rejection: discard readings that jump >20° in one frame
+        if last_valid_pitch is not None and abs(raw_pitch - last_valid_pitch) > 20:
+            raw_pitch = last_valid_pitch
+        else:
+            last_valid_pitch = raw_pitch
+
         # All three angles are now Kalman-filtered to suppress landmark jitter
         pitch = pitch_kf.update(raw_pitch) - baseline_pitch
         yaw   = yaw_kf.update(raw_yaw)
@@ -356,10 +365,8 @@ while cap.isOpened():
                     prediction_history.clear()  # wipe old tired votes so recovery sticks
                 smoothed_idx = alert_state
 
-                print(f"EAR: {avg_ear_val:.2f} | PERCLOS: {perclos:.2f} | "
-                      f"BlinkRate: {blink_rate:.2f}/s | BlinkDur: {final_blink_dur:.2f} | "
-                      f"Pitch: {pitch:.1f} | Ratio: {tired_ratio*100:.0f}% | "
-                      f"WinDur: {window_duration:.2f}s")
+                print(f"EAR:{avg_ear_val:.2f} PERCLOS:{perclos:.2f} Pitch:{pitch:.1f} "
+                      f"vote:{tired_ratio*100:.0f}% state:{'TIRED' if alert_state else 'ATTENTIVE'}")
 
                 # --- HYBRID OVERRIDE ---
                 if final_blink_dur > 2.5 or perclos > 0.85:
