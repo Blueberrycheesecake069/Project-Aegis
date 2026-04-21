@@ -204,6 +204,17 @@ while cap.isOpened():
                 print(f"\n[!!!] FATAL AI CRASH: {e}\n")
                 break
 
+            # Feature override: only force attentive when eyes are very close
+            # to the calibrated fully-open baseline (within 3%)
+            if perclos < 0.05 and avg_ear_val > 0.97:
+                raw_class_idx = 0
+
+            # Manual yawn override: resting MAR is always ~0.66 due to broken
+            # MOUTH_IDX, but a real yawn pushes it above 0.75 as the lower lip
+            # drops. Force a tired vote regardless of model output.
+            if mar > 0.75:
+                raw_class_idx = 1
+
             # --- WARMUP: suppress alerts while features settle after window fills ---
             warmup_elapsed = current_time - window_filled_time
             if warmup_elapsed < WARMUP_SECONDS:
@@ -226,6 +237,7 @@ while cap.isOpened():
                     alert_state = 1
                 elif alert_state == 1 and tired_ratio < TIRED_EXIT_THRESHOLD:
                     alert_state = 0
+                    prediction_history.clear()  # wipe old tired votes so recovery sticks
                 smoothed_class_idx = alert_state
 
                 # --- X-RAY ---

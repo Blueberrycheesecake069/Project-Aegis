@@ -32,9 +32,9 @@ def get_head_pose(landmarks, img_w, img_h):
         return 0.0, 0.0, 0.0
 
     focal_length = 1 * img_w
-    cam_matrix = np.array([ [focal_length, 0, img_h / 2],
-                            [0, focal_length, img_w / 2],
-                            [0, 0, 1]])
+    cam_matrix = np.array([[focal_length, 0, img_w / 2],
+                           [0, focal_length, img_h / 2],
+                           [0, 0, 1]])
     dist_matrix = np.zeros((4, 1), dtype=np.float64)
 
     success, rot_vec, trans_vec = cv2.solvePnP(
