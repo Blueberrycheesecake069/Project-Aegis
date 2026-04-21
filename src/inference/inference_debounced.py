@@ -59,7 +59,8 @@ CALIBRATION_FRAMES = 50
 SMOOTHING_SECONDS = 5.0
 WARMUP_SECONDS = 5.0         # suppress alerts while features settle after window fills
 EAR_CLOSED_THRESHOLD = 0.75  # normalized EAR below this = eye closed (was 0.65, raised to catch partial closure)
-TIRED_VOTE_THRESHOLD = 0.50  # fraction of votes in smoothing window needed to trigger tired (was 0.60)
+TIRED_ENTER_THRESHOLD = 0.60 # tired_ratio must exceed this to trigger TIRED
+TIRED_EXIT_THRESHOLD  = 0.25 # tired_ratio must drop below this to revert to ATTENTIVE
 
 # Histories
 ear_history = deque(maxlen=WINDOW_SIZE)
@@ -74,6 +75,7 @@ is_blinking = False
 is_yawning = False
 missing_face_frames = 0
 window_filled_time = None  # set when ear_history reaches WINDOW_SIZE for the first time
+alert_state = 0             # 0 = attentive, 1 = tired (hysteresis state machine)
 
 # Kalman filters — one per signal
 ear_kf = KalmanFilter1D(process_variance=1e-4, measurement_variance=1e-2)
@@ -218,9 +220,13 @@ while cap.isOpened():
                 if len(prediction_history) > 0:
                     tired_votes = sum([vote[1] for vote in prediction_history])
                     tired_ratio = tired_votes / len(prediction_history)
-                    smoothed_class_idx = 1 if tired_ratio >= TIRED_VOTE_THRESHOLD else 0
-                else:
-                    smoothed_class_idx = 0
+
+                # Hysteresis: high threshold to enter TIRED, low threshold to exit
+                if alert_state == 0 and tired_ratio >= TIRED_ENTER_THRESHOLD:
+                    alert_state = 1
+                elif alert_state == 1 and tired_ratio < TIRED_EXIT_THRESHOLD:
+                    alert_state = 0
+                smoothed_class_idx = alert_state
 
                 # --- X-RAY ---
                 print(f"NormEAR: {avg_ear_val:.2f} | PERCLOS: {perclos:.2f} | BlinkDur: {final_blink_dur:.2f} | Pitch: {pitch:.1f} | 5s Ratio: {tired_ratio*100:.0f}%")
