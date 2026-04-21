@@ -11,7 +11,11 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import time
+import queue
+import subprocess
+import threading
 from collections import deque
+from flask import Flask, Response
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -20,6 +24,68 @@ from utils.feature_utils_pi import (
     calculate_aspect_ratio, get_head_pose,
     LEFT_EYE_IDX, RIGHT_EYE_IDX, MOUTH_IDX
 )
+
+# =============================================================================
+# FLASK MJPEG STREAM
+# Open http://<pi-ip>:8080 in your browser on any PC on the same network.
+# =============================================================================
+_stream_queue = queue.Queue(maxsize=1)  # only ever holds the latest frame
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return '<html><body><img src="/video_feed" width="640"></body></html>'
+
+@app.route('/video_feed')
+def video_feed():
+    def generate():
+        while True:
+            frame = _stream_queue.get()
+            _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+threading.Thread(
+    target=lambda: app.run(host='0.0.0.0', port=8080, threaded=True, use_reloader=False),
+    daemon=True
+).start()
+print("Stream live at http://<pi-ip>:8080")
+
+# =============================================================================
+# AUDIO ALERT (Bluetooth speaker)
+# Place your alert sound at the path below (WAV or MP3).
+# Uses aplay for WAV (built-in on Raspbian) or mpg123 for MP3.
+# Install mpg123 with: sudo apt install mpg123
+# =============================================================================
+ALERT_AUDIO_PATH = os.path.join(_PROJECT_ROOT, 'assets', 'alert.wav')
+ALERT_COOLDOWN   = 8.0   # minimum seconds between consecutive alerts
+
+_last_alert_time = 0.0
+
+
+def _play_alert_worker():
+    """Plays the alert audio file in a background thread."""
+    ext = os.path.splitext(ALERT_AUDIO_PATH)[1].lower()
+    try:
+        if ext == '.mp3':
+            subprocess.run(['mpg123', '-q', ALERT_AUDIO_PATH], check=False)
+        else:
+            subprocess.run(['aplay', '-q', ALERT_AUDIO_PATH], check=False)
+    except FileNotFoundError:
+        # player binary not found — silently skip
+        pass
+
+
+def trigger_alert():
+    """Fires alert if enough time has passed since the last one."""
+    global _last_alert_time
+    now = time.time()
+    if now - _last_alert_time >= ALERT_COOLDOWN:
+        _last_alert_time = now
+        threading.Thread(target=_play_alert_worker, daemon=True).start()
+
 
 # TFLite runtime — lightweight package on Pi, falls back to full TF on PC
 try:
@@ -58,7 +124,7 @@ _MODEL_PATH      = os.path.join(_PROJECT_ROOT, 'models', 'vision_model.tflite')
 _LANDMARKER_PATH = os.path.join(_PROJECT_ROOT, 'models', 'face_landmarker.task')
 
 try:
-    interpreter = TFLiteInterpreter(model_path=_MODEL_PATH)
+    interpreter = TFLiteInterpreter(model_path=_MODEL_PATH, num_threads=2)
     interpreter.allocate_tensors()
     _input_details  = interpreter.get_input_details()
     _output_details = interpreter.get_output_details()
@@ -116,6 +182,8 @@ yaw_kf   = KalmanFilter1D(process_variance=0.5,  measurement_variance=2.0)
 roll_kf  = KalmanFilter1D(process_variance=0.5,  measurement_variance=2.0)
 
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 
 # =============================================================================
@@ -159,8 +227,12 @@ def run_calibration(cap, detector, retry_msg=None):
         if retry_msg:
             cv2.putText(frame, retry_msg, (50, 320),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 100, 255), 2)
-        cv2.imshow('Project Aegis Pi', frame)
-        cv2.waitKey(1)
+        if _stream_queue.full():
+            try:
+                _stream_queue.get_nowait()
+            except queue.Empty:
+                pass
+        _stream_queue.put(frame)
 
     baseline_ear   = np.mean(calibration_ears)   if calibration_ears    else 0.0
     baseline_pitch = np.mean(calibration_pitches) if calibration_pitches else 0.0
@@ -201,8 +273,12 @@ for attempt in range(MAX_CALIB_ATTEMPTS):
                 cv2.putText(frame,
                             "Sit straight, look at camera, don't blink.",
                             (50, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
-                cv2.imshow('Project Aegis Pi', frame)
-                cv2.waitKey(1)
+                if _stream_queue.full():
+                    try:
+                        _stream_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                _stream_queue.put(frame)
 
 
 # =============================================================================
@@ -365,12 +441,14 @@ while cap.isOpened():
                 if final_blink_dur > 2.5 or perclos > 0.85:
                     state_text = "!!! MICRO-SLEEP DETECTED !!!"
                     color = (0, 0, 255)
+                    trigger_alert()
                 elif smoothed_idx == 0:
                     state_text = f"ATTENTIVE ({int(confidence * 100)}%)"
                     color = (0, 255, 0)
                 else:
                     state_text = f"TIRED ({int(confidence * 100)}%)"
                     color = (0, 0, 255)
+                    trigger_alert()
                     if confidence > 0.8:
                         state_text = "!!! WAKE UP !!!"
 
@@ -386,9 +464,13 @@ while cap.isOpened():
     # --- OVERLAY ---
     cv2.putText(frame, state_text, (30, 80),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
-    cv2.imshow('Project Aegis Pi', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+
+    # Push annotated frame to stream (drop old frame if browser is slow)
+    if _stream_queue.full():
+        try:
+            _stream_queue.get_nowait()
+        except queue.Empty:
+            pass
+    _stream_queue.put(frame)
 
 cap.release()
-cv2.destroyAllWindows()
